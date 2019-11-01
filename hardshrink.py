@@ -298,7 +298,7 @@ def printProgress(s):
 
 class Entry:
     def __init__(self, hardshrinkDb, index):
-        """Constructor: Extract one entry from
+        """Constructor.
         """        
         self.clear()
         self.hardshrinkDb = hardshrinkDb
@@ -374,17 +374,22 @@ class HardshrinkDb:
         return r
 
 
-    def getCurrentItemHash(self):
-        """Get current item under iterator, optionally incrementing iterator.
+    def getCurrentItemKey(self):
+        """Get current sort key for item hash under iterator.
+
+        We intentionally return the full entry, not just the hash, because this
+        key is used to sort HardshrinkDB containers during the merge-sort, and 
+        these must be sorted in the same way as sortarray.sortArray does, and
+        this also uses the full entry.
         """
         if self.isIteratorValid():
             offset = self.iterator * self.entrySize
-            return self.data[offset : offset + 5]
+            return self.data[offset : offset + self.entrySize]
         else:
             # Return the highest hash value to make sure that DBs which ran
-            # out of items are sorted to the end bygetNextFileListWithTheSameHash() 
+            # out of items are sorted to the end by getNextFileListWithTheSameHash() 
             # so they can get removed from the DB list.
-            return array.array("I", (0xffffFFFF, 0xffffFFFF, 0xffffFFFF, 0xffffFFFF, 0xffffFFFF))
+            return array.array("I", (0xffffFFFF,) * self.entrySize)
 
 
     def load(self, filename):
@@ -626,12 +631,12 @@ def getNextFileListWithTheSameHash(dbList):
     
     dbList must not be empty, but the dbs in it may be empty.
     """
-    dbList.sort(key = lambda x: x.getCurrentItemHash())
+    dbList.sort(key = lambda x: x.getCurrentItemKey())
     if not dbList[0].isIteratorValid():
         return []
     r = [dbList[0].getCurrentItem(advance = True)]
     for db in dbList:
-        while db.isIteratorValid() and (db.getCurrentItemHash() == r[0].hash):
+        while db.isIteratorValid() and (db.getCurrentItemKey()[0:5] == r[0].hash):
             r.append(db.getCurrentItem(advance = True))
             
     # Remove last db in case we processed all entries.
