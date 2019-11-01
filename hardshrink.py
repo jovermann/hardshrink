@@ -682,8 +682,25 @@ def findDuplicates(dbList_, func):
         func(files)
 
         
-def printFiles(files):
-    """Print all files in the list.
+def printDuplicates(files):
+    """Print all duplicate files.
+    """
+    if len(files) > 1:
+        print("{} identical files:".format(len(files)))
+        for f in files:
+            f.dump()
+
+
+def printSingletons(files):
+    """Print all singleton files.
+    """
+    if len(files) == 1:
+        for f in files:
+            f.dump()
+
+
+def printAll(files):
+    """Print all duplicate files.
     """
     if len(files) == 1:
         print("singleton:")
@@ -691,7 +708,7 @@ def printFiles(files):
         print("{} identical files:".format(len(files)))
     for f in files:
         f.dump()
-        
+
 
 def processDir(dir):
     """Process directory.
@@ -787,8 +804,10 @@ def main():
     parser.add_argument("-0", "--dummy", help="Dummy mode. Nothing will be hardlinked, but db files will be created/overwritten.", action="store_true", default=False)
     parser.add_argument("-V", "--verbose", help="Be more verbose. May be specified multiple times.", action="count", default=0) # -v is taken by --version, argh!
     parser.add_argument("-p", "--progress", help="Indicate progress.", action="store_true", default=False)
-    parser.add_argument(      "--dump", help="Print DBs.", action="store_true", default=False)
-    parser.add_argument(      "--print-duplicates", help="Print duplicate files.", action="store_true", default=False)
+    parser.add_argument(      "--dump", help="Print DBs. Do not link/process anything further after scanning and/or reading dbs.", action="store_true", default=False)
+    parser.add_argument("-D", "--print-duplicates", help="Print duplicate files. Do not hardlink anything.", action="store_true", default=False)
+    parser.add_argument(      "--print-singletons", help="Print singleton files. Do not hardlink anything.", action="store_true", default=False)
+    parser.add_argument(      "--print-all", help="Print all files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
@@ -803,6 +822,8 @@ def main():
     # Check args.
     if len(options.args) < 1:
         parser.error("Expecting at least one directory")
+    if options.print_duplicates + options.print_singletons + options.print_all > 1:
+        parser.error("Only one of the --print-* options may be specified.")
         
     # Check all dirs beforehand to show errors fast.
     for i in options.args:
@@ -824,7 +845,11 @@ def main():
             # Find and hardlink duplicates.
             func = linkFiles
             if options.print_duplicates:
-                func = printFiles
+                func = printDuplicates
+            if options.print_singletons:
+                func = printSingletons
+            if options.print_all:
+                func = printAll
             findDuplicates(dbList, func)
 
             # Update db files in case files were hardlinked to update the inode and mtime fields for these files.
@@ -835,7 +860,8 @@ def main():
     except RuntimeError as e:
         print("Error: {}".format(str(e)))
 
-    stats.printStats()
+    if options.verbose:
+        stats.printStats()
     
     
       
