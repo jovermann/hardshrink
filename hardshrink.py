@@ -510,7 +510,7 @@ class HardshrinkDb:
         self.dirty = False
 
             
-    def scanDir(self, dir):
+    def scanDir(self, dir, noHash = False):
         """Scan directrory and populate db.
         """
         if options.verbose >= 1:
@@ -532,7 +532,10 @@ class HardshrinkDb:
                     continue
                 if f == strToBytes(options.db):
                     continue
-                hash = getHash(path)
+                if noHash:
+                    hash = b"\xff" * 20
+                else:
+                    hash = getHash(path)
                 size = statinfo.st_size
                 fileOffset = addString(self.filenames, f)
                 
@@ -564,7 +567,20 @@ class HardshrinkDb:
         self.sort()
         self.dirty = True
         
-            
+
+    def updateHashesFromDb(db):
+        """Update hashes from other DB.
+
+        If no valid hash is found in other db calculate hash.
+        Valid entry means: One with the same filename, same size and same mtime.
+
+        Preconditions:
+        - self is already sorted (by scanDir())
+        - db is already sorted (by load())
+        """
+        raise RuntimeError("todo")
+
+
     def sort(self):
         """Sort entries to hash and then mtime, in place.
         """
@@ -722,6 +738,18 @@ def processDir(dir):
     db = HardshrinkDb()
     if (not options.force_scan) and os.path.isfile(dbfile):
         db.load(dbfile)
+        if options.update:
+            # Updating essentially means:
+            # We want the new db to look _exactly_ like the current directory tree,
+            # perhaps removing and adding files compared to the old db.
+            # But we want to avoid re-calculating the hashes for files which have
+            # the same name, size and mtime, so take these from the old db. 
+            # And still calculate the hashes for all new files.
+            dbnew = HardshrinkDb()
+            dbnew.scanDir(dir, noHash = True)
+            dbnew.updateHashesFromDB(db)
+            db = dbnew
+            db.save(dbfile)
     else:
         db.scanDir(dir)
         db.save(dbfile)
@@ -806,6 +834,7 @@ def main():
     parser.add_argument(      "--db", help="Database filename which stores all file attributes persistently between runs inside each dir.", type=str, default=".hardshrinkdb")
     parser.add_argument("-B", "--block-size", help="Block size of underlying filesystem. Default 4096.", type=int, default=4096)
     parser.add_argument("-f", "--force-scan", help="Ignore any existing db files. Always scan directories and overwrite db files.", action="store_true", default=False)
+    parser.add_argument("-u", "--update", help="Update existing db files by re-scanning the directories but not re-calculating the hashes if the mtime did not change.", action="store_true", default=False)
     parser.add_argument("-0", "--dummy", help="Dummy mode. Nothing will be hardlinked, but db files will be created/overwritten.", action="store_true", default=False)
     parser.add_argument("-V", "--verbose", help="Be more verbose. May be specified multiple times.", action="count", default=0) # -v is taken by --version, argh!
     parser.add_argument("-p", "--progress", help="Indicate progress.", action="store_true", default=False)
