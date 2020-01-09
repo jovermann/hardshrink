@@ -76,7 +76,7 @@ def _sortArrayRangeFast(data, elementSize, start, end):
     """
     l = list(range(start, end + 1))
     l.sort(key = lambda i: list(data[i * elementSize : (i + 1) * elementSize]))
-    a = array.array("I")
+    a = array.array("Q")
     for i in l:
         a.extend(data[i * elementSize : (i + 1) * elementSize])
     data[start * elementSize : (end + 1) * elementSize] = a
@@ -127,7 +127,7 @@ def _dump(data, elementSize, title):
 def _test(size, elementSize):
     """
     """
-    a = array.array("I")
+    a = array.array("Q")
     for i in range(size * elementSize):
         a.append(random.randint(0, 4294967295))
     if isSortedArray(a, elementSize):
