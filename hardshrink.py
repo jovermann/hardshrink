@@ -2,7 +2,7 @@
 #
 # hardshrink.py - find duplicate files and create hardlinks
 #
-# Requires Python 3.5 (for os.path.commonpath())
+# Requires Python >= 3.5 (for os.path.commonpath())
 #
 # Copyright (C) 2019-2020 by Johannes Overmann <Johannes.Overmann@joov.de>
 
@@ -143,11 +143,17 @@ def remainingTimeStr(startTime, current, total):
     From current to total, started on startTime.
     """
     elapsedTime = time.time() - startTime
-    if elapsedTime == 0.0:
-        elapsedTime = 0.0001
+    if current == 0:
+        current = 1
     totalTime = (elapsedTime / current) * total
     remainingTime = totalTime - elapsedTime
     return time.strftime('%H:%M:%S', time.gmtime(remainingTime))
+
+
+def progressStr(startTime, current, total):
+    """Get progress string (a/b, HH::MM:SS remaining).
+    """
+    return "{}/{} ({:.1f}% done, {} remaining)".format(current, total, current * 100.0 / total, remainingTimeStr(startTime, current, total))
 
 
 def write64(f, x):
@@ -651,7 +657,7 @@ class HardshrinkDb:
         """
         print("HardshrinkDB for dir \"{}\":".format(bytesToStr(self.rootDir)))
         bytesPerFile = self.getTotalSizeInBytes() / self.getNumFiles()
-        print("({} files, {} total, {} data, {} strings, {:.1f} bytes/file)".format(self.getNumFiles(), kB(self.getTotalSizeInBytes()), kB(len(self.data) * 4), kB(len(self.stringData)), bytesPerFile))
+        print("({} files, {} total, {} data, {} strings, {:.1f} bytes/db entry)".format(self.getNumFiles(), kB(self.getTotalSizeInBytes()), kB(len(self.data) * 4), kB(len(self.stringData)), bytesPerFile))
         for i in range(0, self.getNumFiles()):
             self.getEntry(i).dump()
 
@@ -717,13 +723,13 @@ def getListOfFileListsWithIdenticalHashes(files, justPropagateExistingHashes):
                 inodeToEntry[entry.inode].clearHash()
                 inodeToEntry[entry.inode] = entry
             elif entry.mtime == inodeToEntry[entry.inode].mtime:
-                # Entries with identical mtime:
+                # Entries with identical size and mtime:
                 if entry.hasHash():
                     if inodeToEntry[entry.inode].hasHash():
                         if entry.hash != inodeToEntry[entry.inode].hash:
-                            # Inconsistent hashes for the same inode an the same mtime: This indicates trouble and is worth a warning.
+                            # Inconsistent hashes for the same inode, same size an the same mtime: This indicates trouble and is worth a warning.
                             # To be conservative we remove the hashes from both entries since we do not know which one to trust.
-                            print("Warning: Inconsistent hashes:")
+                            print("Warning: Inconsistent hashes for two files with the same inode, same size and same mtime: Will ignore and re-calculate hashes:")
                             entry.dump()
                             inodeToEntry[entry.inode].dump()
                             entry.clearHash()
@@ -745,6 +751,7 @@ def getListOfFileListsWithIdenticalHashes(files, justPropagateExistingHashes):
                 entry.clearHash()
 
     # For --update do not calculate new hashes (yet). Just re-use existing hashes.
+    # Copy hashes from entries having the same inode, size and mtime.
     if justPropagateExistingHashes:
         for entry in files:
             if not entry.hasHash():
@@ -762,12 +769,13 @@ def getListOfFileListsWithIdenticalHashes(files, justPropagateExistingHashes):
             entry.calcHash()
 
     # Update the hashes of all files according to the map.
+    # Copy hashes from entries having the same inode, size and mtime.
     for entry in files:
         if not entry.hasHash():
             entry.setHashAndMtime(inodeToEntry[entry.inode].hash, inodeToEntry[entry.inode].mtime)
         else:
             if entry.hash != inodeToEntry[entry.inode].hash:
-                raise RuntimeError("Internal error: Inconsistent hashes!")
+                raise RuntimeError("Internal error: Inconsistent hashes for different files pointing to the same inode!")
 
     # Sort by hash, mtime and then inode
     files = sorted(files, key = lambda x: (x.hash, x.mtime, x.inode))
@@ -806,13 +814,19 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
 
     # Not a deepcopy. We just want to preserve the order of the original dbList since dbList is permuted and cleared in the following.
     dbList = dbList_.copy()
+    totalFiles = sum([db.getNumFiles() for db in dbList])
+    numFiles = 0
+    startTime = time.time()
     while len(dbList) > 0:
-        files = getNextFileListWithTheSameSize(dbList)
-        fileLists = getListOfFileListsWithIdenticalHashes(files, justPropagateExistingHashes)
+        allFiles = getNextFileListWithTheSameSize(dbList)
+        fileLists = getListOfFileListsWithIdenticalHashes(allFiles, justPropagateExistingHashes)
         if justPropagateExistingHashes:
             continue
         if len(fileLists) == 0:
             break
+
+        if options.verbose >= 1:
+            print("Processing size {} ({} files, {} unique hashes)".format(allFiles[0].size, len(allFiles), len(fileLists)))
 
         for files in fileLists:
             # Process identical files.
@@ -830,6 +844,11 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             stats.numBytesTotal += sum((x.size for x in files))
 
             func(files)
+
+        numFiles += len(allFiles)
+        if progressDue():
+            printProgress("Processing file " + progressStr(startTime, numFiles, totalFiles))
+
 
 
 def printDuplicates(files):
@@ -871,9 +890,10 @@ def processDir(dir):
             # Updating essentially means:
             # We want the new db to look _exactly_ like the current directory tree,
             # perhaps removing and adding files compared to the old db.
-            # Thus we need to rescan it completely.
+            # Thus we need to rescan the tree it completely.
             # But we want to avoid re-calculating the hashes for files which have
-            # the same size and mtime, so take these from the old db.
+            # the same inode, size and mtime, so take these from the old db.
+            # This supports moving and renaming files.
             dbnew = HardshrinkDb()
             dbnew.scanDir(dir)
             dbList = [db, dbnew]
@@ -881,6 +901,8 @@ def processDir(dir):
             db = dbnew
             db.save(dbfile)
     else:
+        if options.ignore_dirs_without_db:
+            return None
         # Fresh scan of directory. Ignore any existing db file.
         db.scanDir(dir)
         db.save(dbfile)
@@ -965,7 +987,8 @@ def main():
     parser.add_argument(      "--db", help="Database filename which stores all file attributes persistently between runs inside each dir.", type=str, default=".hardshrinkdb")
     parser.add_argument("-B", "--block-size", help="Block size of underlying filesystem. Default 4096.", type=int, default=4096)
     parser.add_argument("-f", "--force-scan", help="Ignore any existing db files. Always scan directories and overwrite db files.", action="store_true", default=False)
-    parser.add_argument("-u", "--update", help="Update existing db files by re-scanning the directories but not re-calculating the hashes if the size and mtime did not change.", action="store_true", default=False)
+    parser.add_argument("-u", "--update", help="Update existing db files by re-scanning the directories but not re-calculating the hashes if the inode, size and mtime did not change.", action="store_true", default=False)
+    parser.add_argument(      "--ignore-dirs-without-db", help="Ignore dirs which do not already have a db file.", action="store_true", default=False)
     parser.add_argument("-0", "--dummy", help="Dummy mode. Nothing will be hardlinked, but db files will be created/updated.", action="store_true", default=False)
     parser.add_argument("-V", "--verbose", help="Be more verbose. May be specified multiple times.", action="count", default=0) # -v is taken by --version, argh!
     parser.add_argument("-p", "--progress", help="Indicate progress.", action="store_true", default=False)
@@ -1007,7 +1030,14 @@ def main():
 
         # Scan all dirs or read the dbs.
         for dir in options.args:
-            dbList.append(processDir(strToBytes(os.path.normpath(dir))))
+            db = processDir(strToBytes(os.path.normpath(dir)))
+            if db != None:
+                dbList.append(db)
+
+        if options.verbose:
+            totalDbSize = sum([db.getTotalSizeInBytes() for db in dbList])
+            totalFiles = sum([db.getNumFiles() for db in dbList])
+            print("Total DB size {} ({:.1f} bytes/db entry)".format(kB(totalDbSize), float(totalDbSize) / totalFiles))
 
         if not options.dump:
 
