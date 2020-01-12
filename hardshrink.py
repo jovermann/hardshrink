@@ -32,6 +32,12 @@ options = None
 # Print progress output once a second:
 lastProgressTime = 0.0
 
+def getTimeStr(seconds):
+    """Get HH:MM:SS time string for seconds.
+    """
+    return time.strftime('%H:%M:%S', time.gmtime(seconds))
+
+
 class Stat:
     """Global statistics.
     """
@@ -40,27 +46,58 @@ class Stat:
         """
         self.numFilesRemoved = 0
         self.numBytesRemoved = 0
+        self.numFilesLinked = 0
+        self.numBytesLinked = 0
         self.numFilesHashed = 0
         self.numBytesHashed = 0
+        self.numFilesHaveHash = 0
+        self.numBytesHaveHash = 0
         self.numFilesRedundant = 0
         self.numBytesRedundant = 0
         self.numFilesTotal = 0
         self.numBytesTotal = 0
         self.numFilesSingletons = 0
-        self.numFilesGroups = 0
+        self.numBytesSingletons = 0
+        self.numFilesNonSingletons = 0
+        self.numBytesNonSingletons = 0
+        self.numFilesUnique = 0
+        self.numBytesUnique = 0
         self.numFilesSkipped = 0
+        self.numBytesSkipped = 0
+        self.currentDir = 0
+        self.numDirsTotal = 0
+        self.startTime = time.time()
+        self.hashTime = 0
+        self.numBytesInDb = 0
 
 
     def printStats(self):
         """Print statistics.
         """
-        print("Statistics:")
-        for k, v in sorted(self.__dict__.items()):
-            if not k.startswith("_"):
-                if k.find("Bytes") >= 0:
-                    print("{:20}= {}".format(k, kB(int(v))))
-                else:
-                    print("{:20}= {:13}".format(k, int(v)))
+        self.numFilesDisk = self.numFilesUnique + self.numFilesRedundant
+        self.numBytesDisk = self.numBytesUnique + self.numBytesRedundant
+
+        self.elapsedTime = time.time() - self.startTime
+        if self.hashTime == 0:
+            self.hashTime = 0.0001
+        self.printAspect(self.numFilesTotal, self.numBytesTotal, "total, processed in {} ({}/s, {:.1f} files/s) (in {} dirs)".format(getTimeStr(self.elapsedTime), kB(self.numBytesTotal / self.elapsedTime), self.numFilesTotal /self.elapsedTime, self.numDirsTotal))
+        self.printAspect(self.numFilesDisk, self.numBytesDisk, "disk usage total")
+        self.printAspect(self.numFilesSingletons, self.numBytesSingletons, "singletons")
+        self.printAspect(self.numFilesNonSingletons, self.numBytesNonSingletons, "non-singletons")
+        self.printAspect(self.numFilesUnique, self.numBytesUnique, "unique files")
+        self.printAspect(self.numFilesHaveHash, self.numBytesHaveHash, "have a hash")
+        self.printAspect(self.numFilesRedundant, self.numBytesRedundant, "are redundant")
+        self.printAspect(self.numFilesHashed, self.numBytesHashed, "got a new hash (in {}, {}/s)".format(getTimeStr(self.hashTime), kB(self.numBytesHashed / self.hashTime)))
+        self.printAspect(self.numFilesLinked, self.numBytesLinked, "got hardlinked")
+        self.printAspect(self.numFilesRemoved, self.numBytesRemoved, "got removed")
+        self.printAspect(self.numFilesSkipped, self.numBytesSkipped, "were skipped")
+        self.printAspect(self.numFilesTotal, self.numBytesInDb, "db entries ({:.1f} bytes/entry)".format(float(self.numBytesInDb) / self.numFilesTotal))
+
+
+    def printAspect(self, numFiles, numBytes, aspectStr):
+        """Print aspect.
+        """
+        print("{:8d} files ({:5.1f}%) and {} ({:5.1f}%) {}".format(numFiles, numFiles * 100.0 / self.numFilesTotal, kB(numBytes), numBytes * 100.0 / self.numBytesTotal, aspectStr))
 
 
 stats = Stat()
@@ -118,6 +155,7 @@ def kB(n, width = 7):
     9.876TB
     ...
     """
+    n = int(n)
     if n < 0:
         raise RuntimeError("kb(x) for x < 0 called")
     if width < 5:
@@ -222,8 +260,8 @@ def readString(array, offset):
     return array[offset: offset + l].tobytes()
 
 
-def getHash(path):
-    """Get hash for file.
+def calcHash(path):
+    """Calculate hash for file.
 
     We use sha1 since this is the fastest algorithm in hashlib (except for
     md4). The current collision attacks are of no concern for the purpose
@@ -232,6 +270,7 @@ def getHash(path):
     if options.verbose >= 2:
         print("Hashing {}".format(bytesToStr(path)))
 
+    startTime = time.time()
     blocksize = 65536
     hash = hashlib.sha1()
     numBytes = 0
@@ -241,6 +280,7 @@ def getHash(path):
             numBytes += len(block)
     stats.numBytesHashed += numBytes
     stats.numFilesHashed += 1
+    stats.hashTime += time.time() - startTime
     return hash.digest()
 
 
@@ -548,9 +588,11 @@ class HardshrinkDb:
                 # Get meta-data.
                 path = os.path.join(root, f)
                 statinfo = os.lstat(path)
+                # Only process regular files.
                 if not stat.S_ISREG(statinfo.st_mode):
                     stats.numFilesSkipped += 1
                     continue
+                # Ignore .hardshringdb files.
                 if f == options.db_bytes:
                     continue
                 size = statinfo.st_size
@@ -573,7 +615,7 @@ class HardshrinkDb:
 
                 totalSize += roundUpBlocks(size)
                 if progressDue():
-                    printProgress("Scan {:6d} {} {}".format(len(self.data) // self.entrySize), kB(totalSize), path[-options.progress_width:])
+                    printProgress("Scan {}/{} {} {:6d} {} {}".format(stats.currentDir + 1, stats.numDirsTotalCmdLine, os.path.basename(bytesToStr(dir)), len(self.data) // self.entrySize, kB(totalSize), bytesToStr(path)[-options.progress_width:]))
         if options.verbose >= 1:
             print("Scanned {} files ({}) {}".format(len(self.data) // self.entrySize, kB(totalSize), " " * options.progress_width))
 
@@ -611,7 +653,7 @@ class HardshrinkDb:
         dir = readString(self.stringData, self.data[i + 6])
         filename = readString(self.stringData, self.data[i + 7])
         path = os.path.join(self.rootDir, dir, filename)
-        hash = getHash(path)
+        hash = calcHash(path)
         if len(hash) != 20:
             raise RuntimeError("wrong hash len")
         hash += b"\0\0\0\0"
@@ -826,14 +868,20 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             break
 
         if options.verbose >= 1:
-            print("Processing size {} ({} files, {} unique hashes)".format(allFiles[0].size, len(allFiles), len(fileLists)))
+            print("Processing size {} ({}) ({} files, {} unique hashes)".format(allFiles[0].size, kB(allFiles[0].size, 5), len(allFiles), len(fileLists)))
 
         for files in fileLists:
             # Process identical files.
+
+            # Update stats.
+            stats.numFilesUnique += 1
+            stats.numBytesUnique += files[0].size
             if len(files) == 1:
                 stats.numFilesSingletons += 1
+                stats.numBytesSingletons += files[0].size
             else:
-                stats.numFilesGroups += 1
+                stats.numFilesNonSingletons += sum((1 for f in files))
+                stats.numBytesNonSingletons += sum((f.size for f in files))
                 inodes = set([files[0].inode])
                 for f in files[1:]:
                     if f.inode not in inodes:
@@ -841,8 +889,11 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
                         stats.numBytesRedundant += f.size
                         inodes.add(f.inode)
             stats.numFilesTotal += len(files)
-            stats.numBytesTotal += sum((x.size for x in files))
+            stats.numBytesTotal += sum((f.size for f in files))
+            stats.numFilesHaveHash += sum((1 for f in files if f.hasHash()))
+            stats.numBytesHaveHash += sum((f.size for f in files if f.hasHash()))
 
+            # Call the actual processing functions.
             func(files)
 
         numFiles += len(allFiles)
@@ -935,12 +986,15 @@ def linkTwoFiles(a, b):
         tofile = bytesToStr(b.path)
         print("Link {} -> {}".format(fromfile, tofile))
     if not options.dummy:
+        statinfo = os.lstat(b.path)
         os.unlink(b.path)
-        if not os.path.exists(b.path):
+        if statinfo.st_nlink == 1:
             stats.numBytesRemoved += b.size
             stats.numFilesRemoved += 1
         os.link(a.path, b.path)
         b.setInodeMtime(a.inode, a.mtime)
+        stats.numBytesLinked += b.size
+        stats.numFilesLinked += 1
 
 
 def linkFiles(files):
@@ -991,6 +1045,7 @@ def main():
     parser.add_argument(      "--ignore-dirs-without-db", help="Ignore dirs which do not already have a db file.", action="store_true", default=False)
     parser.add_argument("-0", "--dummy", help="Dummy mode. Nothing will be hardlinked, but db files will be created/updated.", action="store_true", default=False)
     parser.add_argument("-V", "--verbose", help="Be more verbose. May be specified multiple times.", action="count", default=0) # -v is taken by --version, argh!
+    parser.add_argument(      "--quiet", help="Do not even print final stats.", action="store_true", default=False)
     parser.add_argument("-p", "--progress", help="Indicate progress.", action="store_true", default=False)
     parser.add_argument(      "--dump", help="Print DBs. Do not link/process anything further after scanning and/or reading dbs.", action="store_true", default=False)
     parser.add_argument("-D", "--print-duplicates", help="Print duplicate files. Do not hardlink anything.", action="store_true", default=False)
@@ -1029,15 +1084,14 @@ def main():
         dbList = []
 
         # Scan all dirs or read the dbs.
+        stats.numDirsTotalCmdLine = len(options.args)
         for dir in options.args:
             db = processDir(strToBytes(os.path.normpath(dir)))
             if db != None:
                 dbList.append(db)
-
-        if options.verbose:
-            totalDbSize = sum([db.getTotalSizeInBytes() for db in dbList])
-            totalFiles = sum([db.getNumFiles() for db in dbList])
-            print("Total DB size {} ({:.1f} bytes/db entry)".format(kB(totalDbSize), float(totalDbSize) / totalFiles))
+                stats.numDirsTotal += 1
+                stats.numBytesInDb += db.getTotalSizeInBytes()
+            stats.currentDir += 1
 
         if not options.dump:
 
@@ -1058,8 +1112,9 @@ def main():
 
     except RuntimeError as e:
         print("Error: {}".format(str(e)))
+        return
 
-    if options.verbose:
+    if not options.quiet:
         stats.printStats()
 
 
