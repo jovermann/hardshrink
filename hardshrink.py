@@ -194,6 +194,13 @@ def progressStr(startTime, current, total):
     return "{}/{} ({:.1f}% done, {} remaining)".format(current, total, current * 100.0 / total, remainingTimeStr(startTime, current, total))
 
 
+def getNumHardlinks(path):
+    """Get number of hardlinks.
+    """
+    statinfo = os.lstat(path)
+    return statinfo.st_nlink
+
+
 def write64(f, x):
     """Write 8 bytes to a file.
 
@@ -317,6 +324,13 @@ def printProgress(s):
     sys.stdout.write(" ")
     sys.stdout.write(s)
     sys.stdout.write("    \r")
+    sys.stdout.flush()
+
+
+def print_nolf(s):
+    """Print without trailing linefeed.
+    """
+    sys.stdout.write(s)
     sys.stdout.flush()
 
 
@@ -506,7 +520,7 @@ class HardshrinkDb:
         The entries in the file can not be assumed to be sorted.
         """
         if options.verbose >= 1:
-            print("Reading db from {}".format(bytesToStr(filename)))
+            print_nolf("Reading db from {}\r".format(bytesToStr(filename)))
         self.clear()
         self.dbfile = filename
         self.rootDir = os.path.dirname(filename)
@@ -542,12 +556,15 @@ class HardshrinkDb:
         self.sort()
         self.dirty = False
 
+        if options.verbose >= 1:
+            print("{}: {} files, {}, {:.1f} bytes/entry    ".format(os.path.dirname(bytesToStr(filename)), self.getNumFiles(), kB(self.getTotalDbSizeInBytes()), self.getTotalDbSizeInBytes() / self.getNumFiles()))
+
 
     def save(self, filename):
         """Save hardshrink db to file.
         """
         if options.verbose >= 1:
-            print("Writing db to {} ({})".format(bytesToStr(filename), kB(self.getTotalSizeInBytes())))
+            print("Writing db to {} ({})".format(bytesToStr(filename), kB(self.getTotalDbSizeInBytes())))
         self.dbfile = filename
         with open(filename, "wb") as f:
             write64(f, "HRDSHRNK")
@@ -683,7 +700,13 @@ class HardshrinkDb:
         return len(self.data) // self.entrySize
 
 
-    def getTotalSizeInBytes(self):
+    def getNumBytesInFiles(self):
+        """Get number of bytes in all files.
+        """
+        return sum((self.getEntry(i).size for i in range(0, self.getNumFiles())))
+
+
+    def getTotalDbSizeInBytes(self):
         """Get total size of this container.
 
         This only accounts for the actual data, not any preallocated memory of the arrays.
@@ -698,8 +721,8 @@ class HardshrinkDb:
         """Print db.
         """
         print("HardshrinkDB for dir \"{}\":".format(bytesToStr(self.rootDir)))
-        bytesPerFile = self.getTotalSizeInBytes() / self.getNumFiles()
-        print("({} files, {} total, {} data, {} strings, {:.1f} bytes/db entry)".format(self.getNumFiles(), kB(self.getTotalSizeInBytes()), kB(len(self.data) * 4), kB(len(self.stringData)), bytesPerFile))
+        bytesPerFile = self.getTotalDbSizeInBytes() / self.getNumFiles()
+        print("({} files, {} total, {} data, {} strings, {:.1f} bytes/db entry)".format(self.getNumFiles(), kB(self.getTotalDbSizeInBytes()), kB(len(self.data) * 4), kB(len(self.stringData)), bytesPerFile))
         for i in range(0, self.getNumFiles()):
             self.getEntry(i).dump()
 
@@ -868,7 +891,8 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             break
 
         if options.verbose >= 1:
-            print("Processing size {} ({}) ({} files, {} unique hashes)".format(allFiles[0].size, kB(allFiles[0].size, 5), len(allFiles), len(fileLists)))
+            numInodes = len(set((f.inode for f in allFiles)))
+            print("Processing size {} ({}) ({} files, {} inodes, {} unique hashes)".format(allFiles[0].size, kB(allFiles[0].size, 5), len(allFiles), numInodes, len(fileLists)))
 
         for files in fileLists:
             # Process identical files.
@@ -893,13 +917,12 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             stats.numFilesHaveHash += sum((1 for f in files if f.hasHash()))
             stats.numBytesHaveHash += sum((f.size for f in files if f.hasHash()))
 
-            # Call the actual processing functions.
+            # Call the actual processing function.
             func(files)
 
-        numFiles += len(allFiles)
-        if progressDue():
-            printProgress("Processing file " + progressStr(startTime, numFiles, totalFiles))
-
+            numFiles += len(files)
+            if progressDue():
+                printProgress("Processing file " + progressStr(startTime, numFiles, totalFiles))
 
 
 def printDuplicates(files):
@@ -959,6 +982,8 @@ def processDir(dir):
         db.save(dbfile)
     if options.dump:
         db.dump()
+        stats.numFilesTotal += db.getNumFiles()
+        stats.numBytesTotal += db.getNumBytesInFiles()
     return db
 
 
@@ -986,9 +1011,9 @@ def linkTwoFiles(a, b):
         tofile = bytesToStr(b.path)
         print("Link {} -> {}".format(fromfile, tofile))
     if not options.dummy:
-        statinfo = os.lstat(b.path)
+        numHardlinks = getNumHardlinks(b.path)
         os.unlink(b.path)
-        if statinfo.st_nlink == 1:
+        if numHardlinks == 1:
             stats.numBytesRemoved += b.size
             stats.numFilesRemoved += 1
         os.link(a.path, b.path)
@@ -999,13 +1024,21 @@ def linkTwoFiles(a, b):
 
 def linkFiles(files):
     """Link files to first file (which is supposed to be the oldest inode).
+
+    Honour the maximum number of hardlinks per files which is 65000 on
+    Linux/ext[234] and about 1024 on Windows.
     """
-    base = files[0]
-    for entry in files[1:]:
-        # Do not hardlink files again which are already hardlinked.
-        if entry.inode == base.inode:
-            continue
-        linkTwoFiles(base, entry)
+    base = 0 # Points to the element we link to. Normally just the first element in the list which is the oldest.
+    last = len(files) - 1 # Points to the next element we will remove and replace by a hardlink to files[base].
+    while base < last:
+        numHardlinks = getNumHardlinks(files[base].path)
+        while (base < last) and (numHardlinks < options.max_hardlinks):
+            # Do not hardlink files again which are already hardlinked.
+            if files[base].inode != files[last].inode:
+                linkTwoFiles(files[base], files[last])
+                numHardlinks += 1
+            last -= 1
+        base += 1
 
 
 def hashBench(hash):
@@ -1052,6 +1085,7 @@ def main():
     parser.add_argument(      "--print-singletons", help="Print singleton files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument(      "--print-all", help="Print all files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
+    parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=64980)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
     options.db_bytes = strToBytes(options.db)
@@ -1068,6 +1102,9 @@ def main():
         parser.error("Expecting at least one directory")
     if options.print_duplicates + options.print_singletons + options.print_all > 1:
         parser.error("Only one of the --print-* options may be specified.")
+    if os.name == "nt":
+        if options.max_hardlinks > 1000:
+            options.max_hardlinks = 1000
 
     # Check all dirs beforehand to show errors fast.
     for i in options.args:
@@ -1090,7 +1127,7 @@ def main():
             if db != None:
                 dbList.append(db)
                 stats.numDirsTotal += 1
-                stats.numBytesInDb += db.getTotalSizeInBytes()
+                stats.numBytesInDb += db.getTotalDbSizeInBytes()
             stats.currentDir += 1
 
         if not options.dump:
@@ -1114,7 +1151,7 @@ def main():
         print("Error: {}".format(str(e)))
         return
 
-    if not options.quiet:
+    if (not options.quiet) and (not options.dump):
         stats.printStats()
 
 
