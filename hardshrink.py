@@ -17,6 +17,7 @@ import datetime
 import struct
 import sortarray
 import array
+import shutil
 
 # For array and struct (Python >= 3.5):
 # B = uint8_t
@@ -35,7 +36,10 @@ lastProgressTime = 0.0
 def getTimeStr(seconds):
     """Get HH:MM:SS time string for seconds.
     """
-    return time.strftime('%H:%M:%S', time.gmtime(seconds))
+    if seconds < 86400:
+        return time.strftime('%H:%M:%S', time.gmtime(seconds))
+    else:
+        return time.strftime('{}d%H:%M:%S'.format(int(seconds) // 86400), time.gmtime(int(seconds)))
 
 
 class Stat:
@@ -69,6 +73,12 @@ class Stat:
         self.startTime = time.time()
         self.hashTime = 0
         self.numBytesInDb = 0
+
+        # Used locally by findDuplicates() and callees.
+        self.startTimeFindDuplicates = 0
+        self.numFilesFindDuplicates = 0
+        self.totalFilesFindDuplicates = 0
+        self.sizeFindDuplicates = 0
 
 
     def printStats(self):
@@ -112,7 +122,7 @@ def strToBytes(filename):
 def bytesToStr(filename):
     """Return str for a bytes filename.
     """
-    return filename.decode("utf8")
+    return filename.decode("utf8", errors="backslashreplace")
 
 
 def formatFloat(f, width):
@@ -316,15 +326,30 @@ def progressDue():
     return False
 
 
+needLf = False
+
+
 def printProgress(s):
     """Print progress string.
     """
+    global needLf
     if not options.progress:
         return
     sys.stdout.write(" ")
     sys.stdout.write(s)
     sys.stdout.write("    \r")
     sys.stdout.flush()
+    needLf = True
+
+
+def printLf(s):
+    """Print LF if progress is enabled and if the cursor is on a progress line.
+    """
+    global needLf
+    if needLf:
+        print()
+        needLf = False
+    print(s)
 
 
 def print_nolf(s):
@@ -379,6 +404,15 @@ class Entry:
         self.hash = hash
         self.mtime = mtime
         self.hardshrinkDb.setHashAndMtime(self.index, self.hash, self.mtime)
+
+
+    def updateInodeAndMtime(self):
+        """Update inode and mtime from filesystem.
+
+        Also update db accordingly.
+        """
+        statinfo = os.lstat(self.path)
+        self.setInodeMtime(statinfo.st_ino, int(statinfo.st_mtime * 1000000))
 
 
     def hasHash(self):
@@ -630,7 +664,7 @@ class HardshrinkDb:
                 if options.verbose >= 3:
                     print("File {}".format(bytesToStr(path)))
 
-                totalSize += roundUpBlocks(size)
+                totalSize += size
                 if progressDue():
                     printProgress("Scan {}/{} {} {:6d} {} {}".format(stats.currentDir + 1, stats.numDirsTotalCmdLine, os.path.basename(bytesToStr(dir)), len(self.data) // self.entrySize, kB(totalSize), bytesToStr(path)[-options.progress_width:]))
         if options.verbose >= 1:
@@ -722,7 +756,7 @@ class HardshrinkDb:
         """
         print("HardshrinkDB for dir \"{}\":".format(bytesToStr(self.rootDir)))
         bytesPerFile = self.getTotalDbSizeInBytes() / self.getNumFiles()
-        print("({} files, {} total, {} data, {} strings, {:.1f} bytes/db entry)".format(self.getNumFiles(), kB(self.getTotalDbSizeInBytes()), kB(len(self.data) * 4), kB(len(self.stringData)), bytesPerFile))
+        print("({} files, {} total, {} data, {} strings, {:.1f} bytes/db entry)".format(self.getNumFiles(), kB(self.getTotalDbSizeInBytes()), kB(len(self.data) * 8), kB(len(self.stringData)), bytesPerFile))
         for i in range(0, self.getNumFiles()):
             self.getEntry(i).dump()
 
@@ -863,6 +897,14 @@ def getListOfFileListsWithIdenticalHashes(files, justPropagateExistingHashes):
     return r
 
 
+def printProgressProcessingFiles(numAdditionalFiles = 0, message = ""):
+    """Print progress output while processing files.
+
+    This is called from multiple locations to indicate progress.
+    """
+    printProgress("Processing file {} (size {}{})        ".format(progressStr(stats.startTimeFindDuplicates, stats.numFilesFindDuplicates + numAdditionalFiles, stats.totalFilesFindDuplicates), kB(stats.sizeFindDuplicates), message))
+
+
 def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
     """Find duplicate files.
 
@@ -879,9 +921,9 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
 
     # Not a deepcopy. We just want to preserve the order of the original dbList since dbList is permuted and cleared in the following.
     dbList = dbList_.copy()
-    totalFiles = sum([db.getNumFiles() for db in dbList])
-    numFiles = 0
-    startTime = time.time()
+    stats.totalFilesFindDuplicates = sum([db.getNumFiles() for db in dbList])
+    stats.numFilesFindDuplicates = 0
+    stats.startTimeFindDuplicates = time.time()
     while len(dbList) > 0:
         allFiles = getNextFileListWithTheSameSize(dbList)
         fileLists = getListOfFileListsWithIdenticalHashes(allFiles, justPropagateExistingHashes)
@@ -889,10 +931,11 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             continue
         if len(fileLists) == 0:
             break
+        stats.sizeFindDuplicates = allFiles[0].size
 
         if options.verbose >= 1:
             numInodes = len(set((f.inode for f in allFiles)))
-            print("Processing size {} ({}) ({} files, {} inodes, {} unique hashes)".format(allFiles[0].size, kB(allFiles[0].size, 5), len(allFiles), numInodes, len(fileLists)))
+            printLf("Processing size {} ({}) ({} files, {} inodes, {} unique hashes)".format(allFiles[0].size, kB(allFiles[0].size, 5), len(allFiles), numInodes, len(fileLists)))
 
         for files in fileLists:
             # Process identical files.
@@ -920,9 +963,11 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             # Call the actual processing function.
             func(files)
 
-            numFiles += len(files)
+            stats.numFilesFindDuplicates += len(files)
+
+            # Fallback id func does not print progress.
             if progressDue():
-                printProgress("Processing file " + progressStr(startTime, numFiles, totalFiles))
+                printProgressProcessingFiles()
 
 
 def printDuplicates(files):
@@ -987,6 +1032,27 @@ def processDir(dir):
     return db
 
 
+def getTmpName(path):
+    """Return non-existing filename.
+    """
+    for i in range(10000):
+        tmpname = os.path.join(os.path.dirname(path), strToBytes(os.urandom(4 + i // 1000).hex()) + b".tmp")
+        if not os.path.exists(tmpname):
+            return tmpname
+    raise RuntimeError("Error finding temp name")
+
+
+def breakHardlink(f):
+    """Break hardlink by creating a new copy of the file.
+    """
+    tmpname = getTmpName(f.path)
+    shutil.copy2(f.path, tmpname)
+    if os.name == "nt":
+        os.unlink(f.path)
+    os.rename(tmpname, f.path)
+    f.updateInodeAndMtime()
+
+
 def linkTwoFiles(a, b):
     """Link second file to first. Keep first. Replace second by hardlink to first.
     """
@@ -1012,11 +1078,15 @@ def linkTwoFiles(a, b):
         print("Link {} -> {}".format(fromfile, tofile))
     if not options.dummy:
         numHardlinks = getNumHardlinks(b.path)
-        os.unlink(b.path)
         if numHardlinks == 1:
             stats.numBytesRemoved += b.size
             stats.numFilesRemoved += 1
-        os.link(a.path, b.path)
+        tmpname = getTmpName(b.path)
+        os.link(a.path, tmpname)
+        if os.name == "nt":
+            # Not atomic under Windows.
+            os.unlink(b.path)
+        os.rename(tmpname, b.path) # Implicitly also does unlink(b.path).
         b.setInodeMtime(a.inode, a.mtime)
         stats.numBytesLinked += b.size
         stats.numFilesLinked += 1
@@ -1030,15 +1100,61 @@ def linkFiles(files):
     """
     base = 0 # Points to the element we link to. Normally just the first element in the list which is the oldest.
     last = len(files) - 1 # Points to the next element we will remove and replace by a hardlink to files[base].
+    startTime = time.time()
+    numHardlinksInode = -1
     while base < last:
-        numHardlinks = getNumHardlinks(files[base].path)
+        if files[base].inode != numHardlinksInode:
+            numHardlinks = getNumHardlinks(files[base].path)
+            numHardlinksInode = files[base].inode
         while (base < last) and (numHardlinks < options.max_hardlinks):
             # Do not hardlink files again which are already hardlinked.
             if files[base].inode != files[last].inode:
                 linkTwoFiles(files[base], files[last])
                 numHardlinks += 1
             last -= 1
+
+            if progressDue():
+                done = base + len(files) - last - 1
+                printProgressProcessingFiles(done, ", linking {}/{}, hardlinks {}/{}, base {}, last {}".format(done, len(files) - 1, numHardlinks, options.max_hardlinks, base, last))
         base += 1
+        if progressDue():
+            done = base + len(files) - last - 1
+            printProgressProcessingFiles(done, ", linking {}/{}, hardlinks {}/{}, base {}, last {}".format(done, len(files) - 1, numHardlinks, options.max_hardlinks, base, last))
+
+
+def breakHardlinks(files):
+    """Break hardlinks or re-link until all files have <= options.max_hardlinks hardlinks.
+    """
+    tooHighIndex = 0
+    linksAvailableIndex = 0
+    numRelinked = 0
+    numCopied = 0
+    while True:
+        # Find next file which has too many hardlinks.
+        while (tooHighIndex < len(files)) and (getNumHardlinks(files[tooHighIndex].path) <= options.max_hardlinks):
+            if progressDue():
+                printProgressProcessingFiles(tooHighIndex, ", checking {}/{}, relinked {}, copies {}".format(tooHighIndex, len(files), numRelinked, numCopied))
+            tooHighIndex += 1
+        if tooHighIndex >= len(files):
+            break # No more files have too many hardlinks. Done.
+
+        # Find next file which has links available.
+        while (linksAvailableIndex < len(files)) and (getNumHardlinks(files[linksAvailableIndex].path) >= options.max_hardlinks):
+            linksAvailableIndex += 1
+        if linksAvailableIndex >= len(files):
+            # No more links available in existing files.
+            # Break a link by making a copy, creating a new file with hardlink count of 1.
+            breakHardlink(files[tooHighIndex])
+            numCopied += 1
+            # Restart.
+            linksAvailableIndex = tooHighIndex
+            tooHighIndex += 1
+            continue
+
+        # Link from linksAvailableIndex to tooHighIndex.
+        linkTwoFiles(files[linksAvailableIndex], files[tooHighIndex])
+        tooHighIndex += 1
+        numRelinked += 1
 
 
 def hashBench(hash):
@@ -1075,6 +1191,7 @@ def main():
     parser.add_argument("-B", "--block-size", help="Block size of underlying filesystem. Default 4096.", type=int, default=4096)
     parser.add_argument("-f", "--force-scan", help="Ignore any existing db files. Always scan directories and overwrite db files.", action="store_true", default=False)
     parser.add_argument("-u", "--update", help="Update existing db files by re-scanning the directories but not re-calculating the hashes if the inode, size and mtime did not change.", action="store_true", default=False)
+    parser.add_argument(      "--grow", help="Create copies of files which have more hardlinks than specified with --max-hardlinks. Specify --grow --max-hardlinks 1 to break all hardlinks.", action="store_true", default=False)
     parser.add_argument(      "--ignore-dirs-without-db", help="Ignore dirs which do not already have a db file.", action="store_true", default=False)
     parser.add_argument("-0", "--dummy", help="Dummy mode. Nothing will be hardlinked, but db files will be created/updated.", action="store_true", default=False)
     parser.add_argument("-V", "--verbose", help="Be more verbose. May be specified multiple times.", action="count", default=0) # -v is taken by --version, argh!
@@ -1085,7 +1202,7 @@ def main():
     parser.add_argument(      "--print-singletons", help="Print singleton files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument(      "--print-all", help="Print all files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
-    parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=64980)
+    parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=55000)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
     options.db_bytes = strToBytes(options.db)
@@ -1103,8 +1220,8 @@ def main():
     if options.print_duplicates + options.print_singletons + options.print_all > 1:
         parser.error("Only one of the --print-* options may be specified.")
     if os.name == "nt":
-        if options.max_hardlinks > 1000:
-            options.max_hardlinks = 1000
+        if options.max_hardlinks > 500:
+            options.max_hardlinks = 500
 
     # Check all dirs beforehand to show errors fast.
     for i in options.args:
@@ -1134,6 +1251,8 @@ def main():
 
             # Find and hardlink duplicates.
             func = linkFiles
+            if options.grow:
+                func = breakHardlinks
             if options.print_duplicates:
                 func = printDuplicates
             if options.print_singletons:
