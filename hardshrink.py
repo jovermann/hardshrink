@@ -96,7 +96,7 @@ class Stat:
         self.printAspect(self.numFilesNonSingletons, self.numBytesNonSingletons, "non-singletons")
         self.printAspect(self.numFilesUnique, self.numBytesUnique, "unique files")
         self.printAspect(self.numFilesHaveHash, self.numBytesHaveHash, "have a hash")
-        self.printAspect(self.numFilesRedundant, self.numBytesRedundant, "are redundant")
+        self.printAspect(self.numFilesRedundant, self.numBytesRedundant, "are redundant and not hardlinked")
         self.printAspect(self.numFilesHashed, self.numBytesHashed, "got a new hash (in {}, {}/s)".format(getTimeStr(self.hashTime), kB(self.numBytesHashed / self.hashTime)))
         self.printAspect(self.numFilesLinked, self.numBytesLinked, "got hardlinked")
         self.printAspect(self.numFilesRemoved, self.numBytesRemoved, "got removed")
@@ -904,17 +904,30 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
     stats.numFilesFindDuplicates = 0
     stats.startTimeFindDuplicates = time.time()
     while len(dbList) > 0:
+        # Get list of files with the same size.
         allFiles = getNextFileListWithTheSameSize(dbList)
+        if len(allFiles) == 0:
+            break
+
+        # Check size.
+        size = allFiles[0].size
+        if not justPropagateExistingHashes:
+            if size < options.min_size:
+                continue
+            if size > options.max_size:
+                continue
+
+        # Get list of lists where each inner lists contains files with identical content (ideentical hash).
         fileLists = getListOfFileListsWithIdenticalHashes(allFiles, justPropagateExistingHashes)
         if justPropagateExistingHashes:
             continue
         if len(fileLists) == 0:
             break
-        stats.sizeFindDuplicates = allFiles[0].size
+        stats.sizeFindDuplicates = size
 
         if options.verbose >= 1:
             numInodes = len(set((f.inode for f in allFiles)))
-            printLf("Processing size {} ({}) ({} files, {} inodes, {} unique hashes)".format(allFiles[0].size, kB(allFiles[0].size, 5), len(allFiles), numInodes, len(fileLists)))
+            printLf("Processing size {} ({}) ({} files, {} inodes, {} unique hashes)".format(size, kB(size, 5), len(allFiles), numInodes, len(fileLists)))
 
         for files in fileLists:
             # Process identical files.
@@ -1182,6 +1195,8 @@ def main():
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
     parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=55000)
     parser.add_argument(      "--reverse", help="Process smallest files first, going up. The default is process the biggest files first.", action="store_true", default=False)
+    parser.add_argument(      "--min-size", help="Only process files >= min-size.", type=int, default=0)
+    parser.add_argument(      "--max-size", help="Only process files <= max-size.", type=int, default=2**64)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
     options.db_bytes = strToBytes(options.db)
