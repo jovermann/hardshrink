@@ -88,9 +88,11 @@ class Stat:
         self.numBytesDisk = self.numBytesUnique + self.numBytesRedundant
 
         self.elapsedTime = time.time() - self.startTime
+        if self.elapsedTime == 0:
+            self.elapsedTime = 0.0001
         if self.hashTime == 0:
             self.hashTime = 0.0001
-        self.printAspect(self.numFilesTotal, self.numBytesTotal, "total, processed in {} ({}/s, {:.1f} files/s) (in {} dirs)".format(getTimeStr(self.elapsedTime), kB(self.numBytesTotal / self.elapsedTime), self.numFilesTotal /self.elapsedTime, self.numDirsTotal))
+        self.printAspect(self.numFilesTotal, self.numBytesTotal, "total, processed in {} ({}/s, {:.1f} files/s) (in {} dirs)".format(getTimeStr(self.elapsedTime), kB(self.numBytesTotal / self.elapsedTime), self.numFilesTotal / self.elapsedTime, self.numDirsTotal))
         self.printAspect(self.numFilesDisk, self.numBytesDisk, "disk usage total")
         self.printAspect(self.numFilesSingletons, self.numBytesSingletons, "singletons")
         self.printAspect(self.numFilesNonSingletons, self.numBytesNonSingletons, "non-singletons")
@@ -101,13 +103,22 @@ class Stat:
         self.printAspect(self.numFilesLinked, self.numBytesLinked, "got hardlinked")
         self.printAspect(self.numFilesRemoved, self.numBytesRemoved, "got removed")
         self.printAspect(self.numFilesSkipped, self.numBytesSkipped, "were skipped")
-        self.printAspect(self.numFilesTotal, self.numBytesInDb, "db entries ({:.1f} bytes/entry)".format(float(self.numBytesInDb) / self.numFilesTotal))
+        numFilesTotal = self.numFilesTotal
+        if numFilesTotal == 0:
+            numFilesTotal = 1
+        self.printAspect(self.numFilesTotal, self.numBytesInDb, "db entries ({:.1f} bytes/entry)".format(float(self.numBytesInDb) / numFilesTotal))
 
 
     def printAspect(self, numFiles, numBytes, aspectStr):
         """Print aspect.
         """
-        print("{:8d} files ({:5.1f}%) and {} ({:5.1f}%) {}".format(numFiles, numFiles * 100.0 / self.numFilesTotal, kB(numBytes), numBytes * 100.0 / self.numBytesTotal, aspectStr))
+        numFilesTotal = self.numFilesTotal
+        if numFilesTotal == 0:
+            numFilesTotal = 1
+        numBytesTotal = self.numBytesTotal
+        if numBytesTotal == 0:
+            numBytesTotal = 1
+        print("{:8d} files ({:5.1f}%) and {} ({:5.1f}%) {}".format(numFiles, numFiles * 100.0 / numFilesTotal, kB(numBytes), numBytes * 100.0 / numBytesTotal, aspectStr))
 
 
 stats = Stat()
@@ -1173,10 +1184,23 @@ def hashBench(hash):
     print("{:6.1f}MB/s ({:3} bits) {}".format(numBytes / 1024.0 / 1024.0 / elapsedTime, hash.digest_size * 8, hash.name))
 
 
+def intWithUnit(s):
+    """Convert string to int, allowing unit suffixes.
+
+    This is used as 'type' for argparse.ArgumentParser.
+    """
+    if len(s) == 0:
+        return int(s)
+    index = "BkMGTPE".find(s[-1])
+    if index >= 0:
+        return int(float(s[:-1]) * (1 << (index * 10)))
+    else:
+        return int(s)
+
+
 def main():
     """Main function of this module.
     """
-    print(formatFloat(9.99, 4))
     global options
     usage = """Usage: %(prog)s [OPTIONS] DIRS...
     """
@@ -1199,8 +1223,8 @@ def main():
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
     parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=55000)
     parser.add_argument(      "--reverse", help="Process smallest files first, going up. The default is process the biggest files first.", action="store_true", default=False)
-    parser.add_argument(      "--min-size", help="Only process files >= min-size.", type=int, default=0)
-    parser.add_argument(      "--max-size", help="Only process files <= max-size.", type=int, default=2**64)
+    parser.add_argument(      "--min-size", help="Only process files >= min-size.", type=intWithUnit, default=0)
+    parser.add_argument(      "--max-size", help="Only process files <= max-size.", type=intWithUnit, default=2**64)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
     options.db_bytes = strToBytes(options.db)
