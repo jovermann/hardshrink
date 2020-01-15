@@ -128,22 +128,25 @@ def bytesToStr(filename):
 def formatFloat(f, width):
     """Format positive floating point number into width chars.
 
-    width shoule be >= 3 and must be >= 1.
-    f should be < 10000.0
+    width should be >= 3 and must be >= 1.
     """
-    if f < 10.0:
-        if width >= 3:
-            return "{:{w}.{p}f}".format(f, w = width, p = width - 2)
-    elif f < 100.0:
-        if width >= 4:
-            return "{:{w}.{p}f}".format(f, w = width, p = width - 3)
-    elif f < 1000.0:
-        if width >= 5:
-            return "{:{w}.{p}f}".format(f, w = width, p = width - 4)
-    elif f < 10000.0:
-        if width >= 6:
-            return "{:{w}.{p}f}".format(f, w = width, p = width - 5)
-    return "{:{w}.0f}".format(f, w = width)
+    # This is surpisingly complex due to rounding.
+
+    # First get the number of digit before the point (roughly, due to rounding).
+    s = "{:.0f}".format(f)
+    prec = width - len(s) - 1
+    if prec < 0:
+        return s
+
+    # Then try with one more digit of precision than would normally fit.
+    # This allows to handle 9.9 for width=3 graefully, and also 9.99 for width=4.
+    s = "{:.{p}f}".format(f, p = prec + 1)
+    if len(s) == width:
+        return s
+
+    # This is the common case.
+    s = "{:{w}.{p}f}".format(f, w = width, p = prec)
+    return s
 
 
 def kB(n, width = 7):
@@ -1173,6 +1176,7 @@ def hashBench(hash):
 def main():
     """Main function of this module.
     """
+    print(formatFloat(9.99, 4))
     global options
     usage = """Usage: %(prog)s [OPTIONS] DIRS...
     """
