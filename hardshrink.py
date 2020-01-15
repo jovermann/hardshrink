@@ -288,29 +288,17 @@ def calcHash(path):
         print("Hashing {}".format(bytesToStr(path)))
 
     startTime = time.time()
-    blocksize = 65536
+    blockSize = 65536
     hash = hashlib.sha1()
     numBytes = 0
     with open(path, "rb") as f:
-        for block in iter(lambda: f.read(blocksize), b""):
+        for block in iter(lambda: f.read(blockSize), b""):
             hash.update(block)
             numBytes += len(block)
     stats.numBytesHashed += numBytes
     stats.numFilesHashed += 1
     stats.hashTime += time.time() - startTime
     return hash.digest()
-
-
-def roundUp(x, granularity):
-    """Round up x to the next multiple of granularity.
-    """
-    return ((x + granularity - 1) / granularity) * granularity
-
-
-def roundUpBlocks(x):
-    """Round up to blocks used.
-    """
-    return roundUp(x, options.block_size)
 
 
 def progressDue():
@@ -1179,7 +1167,6 @@ def main():
     parser = argparse.ArgumentParser(usage = usage + "\n(Version " + version + ")\n")
     parser.add_argument("args", nargs="*", help="Dirs to process.")
     parser.add_argument(      "--db", help="Database filename which stores all file attributes persistently between runs inside each dir.", type=str, default=".hardshrinkdb")
-    parser.add_argument("-B", "--block-size", help="Block size of underlying filesystem. Default 4096.", type=int, default=4096)
     parser.add_argument("-f", "--force-scan", help="Ignore any existing db files. Always scan directories and overwrite db files.", action="store_true", default=False)
     parser.add_argument("-u", "--update", help="Update existing db files by re-scanning the directories but not re-calculating the hashes if the inode, size and mtime did not change.", action="store_true", default=False)
     parser.add_argument(      "--grow", help="Create copies of files which have more hardlinks than specified with --max-hardlinks. Specify --grow --max-hardlinks 1 to break all hardlinks.", action="store_true", default=False)
