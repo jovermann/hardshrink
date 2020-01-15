@@ -457,13 +457,16 @@ class HardshrinkDb:
     def resetIterator(self):
         """Reset iterator to the start of the list.
         """
-        self.iterator = 0
+        if options.reverse:
+            self.iterator = 0
+        else:
+            self.iterator = self.getNumFiles() - 1
 
 
     def isIteratorValid(self):
         """Return True iff iterator is valid.
         """
-        return self.iterator * self.entrySize < len(self.data)
+        return (self.iterator >= 0) and (self.iterator < self.getNumFiles())
 
 
     def getCurrentItem(self, advance = False):
@@ -473,26 +476,11 @@ class HardshrinkDb:
         """
         r = self.getEntry(self.iterator)
         if advance:
-            self.iterator += 1
+            if options.reverse:
+                self.iterator += 1
+            else:
+                self.iterator -= 1
         return r
-
-
-    def getCurrentItemKey(self):
-        """Get current sort key for item hash under iterator.
-
-        We intentionally return the full entry, not just the hash, because this
-        key is used to sort HardshrinkDB containers during the merge-sort, and
-        these must be sorted in the same way as sortarray.sortArray does, and
-        this also uses the full entry.
-        """
-        if self.isIteratorValid():
-            offset = self.iterator * self.entrySize
-            return self.data[offset : offset + self.entrySize]
-        else:
-            # Return the highest hash value to make sure that DBs which ran
-            # out of items are sorted to the end by getNextFileListWithTheSameHash()
-            # so they can get removed from the DB list.
-            return array.array("Q", (0xffffFFFFffffFFFF,) * self.entrySize)
 
 
     def getCurrentItemSize(self):
@@ -510,7 +498,10 @@ class HardshrinkDb:
             # Return the highest size value to make sure that DBs which ran
             # out of items are sorted to the end by getNextFileListWithTheSameSize()
             # so they can get removed from the DB list.
-            return 0xffffFFFFffffFFFF
+            if options.reverse:
+                return 0xffffFFFFffffFFFF
+            else:
+                return 0
 
 
     def load(self, filename):
@@ -782,7 +773,7 @@ def getNextFileListWithTheSameSize(dbList):
 
     This may delete entries from dbList until it is empty.
     """
-    dbList.sort(key = lambda x: x.getCurrentItemSize())
+    dbList.sort(key = lambda x: x.getCurrentItemSize(), reverse = not options.reverse)
     if not dbList[0].isIteratorValid():
         del dbList[0]
         return []
@@ -1184,7 +1175,7 @@ def main():
     global options
     usage = """Usage: %(prog)s [OPTIONS] DIRS...
     """
-    version = "0.0.3"
+    version = "0.1.0"
     parser = argparse.ArgumentParser(usage = usage + "\n(Version " + version + ")\n")
     parser.add_argument("args", nargs="*", help="Dirs to process.")
     parser.add_argument(      "--db", help="Database filename which stores all file attributes persistently between runs inside each dir.", type=str, default=".hardshrinkdb")
@@ -1203,6 +1194,7 @@ def main():
     parser.add_argument(      "--print-all", help="Print all files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
     parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=55000)
+    parser.add_argument(      "--reverse", help="Process smallest files first, going up. The default is process the biggest files first.", action="store_true", default=False)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
     options.db_bytes = strToBytes(options.db)
