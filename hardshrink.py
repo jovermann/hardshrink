@@ -209,7 +209,7 @@ def remainingTimeStr(startTime, current, total):
         current = 1
     totalTime = (elapsedTime / current) * total
     remainingTime = totalTime - elapsedTime
-    return time.strftime('%H:%M:%S', time.gmtime(remainingTime))
+    return getTimeStr(remainingTime)
 
 
 def progressStr(startTime, current, total):
