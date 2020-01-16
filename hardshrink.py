@@ -623,6 +623,7 @@ class HardshrinkDb:
         self.clear()
         self.rootDir = dir
         totalSize = 0
+        startTime = time.time()
         for root, dirs, files in os.walk(dir):
             if options.verbose >= 2:
                 print("Dir {}".format(bytesToStr(root)))
@@ -659,9 +660,10 @@ class HardshrinkDb:
 
                 totalSize += size
                 if progressDue():
-                    printProgress("Scan {}/{} {} {:6d} {} {}".format(stats.currentDir + 1, stats.numDirsTotalCmdLine, os.path.basename(bytesToStr(dir)), len(self.data) // self.entrySize, kB(totalSize), bytesToStr(path)[-options.progress_width:]))
+                    printProgress("Scan {} {} {} {} {}".format(progressStr(stats.startTime, stats.currentDir, stats.numDirsTotalCmdLine), os.path.basename(bytesToStr(dir)), len(self.data) // self.entrySize, kB(totalSize), bytesToStr(path)[-options.progress_width:]))
         if options.verbose >= 1:
-            print("Scanned {} files ({}) {}".format(len(self.data) // self.entrySize, kB(totalSize), " " * options.progress_width))
+            elapsed = time.time() - startTime
+            print("Scanned {} files ({}) in {} {}".format(len(self.data) // self.entrySize, kB(totalSize), getTimeStr(elapsed), " " * options.progress_width))
 
         self.sort()
         self.dirty = True
@@ -855,19 +857,20 @@ def getListOfFileListsWithIdenticalHashes(files, justPropagateExistingHashes):
         # Return None to make sure the result is not used (as a list), because the following code will generate invalid file lists (for example a list of all files which do not yet have a hash.).
         return None
 
-    # Calculate missing hashes for all inodes which do not yet have a hash.
-    for (inode, entry) in inodeToEntry.items():
-        if not entry.hasHash():
-            entry.calcHash()
+    if len(inodeToEntry) > 1:
+        # Calculate missing hashes for all inodes which do not yet have a hash.
+        for (inode, entry) in inodeToEntry.items():
+            if not entry.hasHash():
+                entry.calcHash()
 
-    # Update the hashes of all files according to the map.
-    # Copy hashes from entries having the same inode, size and mtime.
-    for entry in files:
-        if not entry.hasHash():
-            entry.setHashAndMtime(inodeToEntry[entry.inode].hash, inodeToEntry[entry.inode].mtime)
-        else:
-            if entry.hash != inodeToEntry[entry.inode].hash:
-                raise RuntimeError("Internal error: Inconsistent hashes for different files pointing to the same inode!")
+        # Update the hashes of all files according to the map.
+        # Copy hashes from entries having the same inode, size and mtime.
+        for entry in files:
+            if not entry.hasHash():
+                entry.setHashAndMtime(inodeToEntry[entry.inode].hash, inodeToEntry[entry.inode].mtime)
+            else:
+                if entry.hash != inodeToEntry[entry.inode].hash:
+                    raise RuntimeError("Internal error: Inconsistent hashes for different files pointing to the same inode!")
 
     # Sort by hash, mtime and then inode
     files = sorted(files, key = lambda x: (x.hash, x.mtime, x.inode))
