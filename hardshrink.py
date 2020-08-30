@@ -18,6 +18,8 @@ import struct
 import sortarray
 import array
 import shutil
+import math
+import copy
 
 # For array and struct (Python >= 3.5):
 # B = uint8_t
@@ -26,6 +28,9 @@ import shutil
 # Q = uint64_t
 
 littleEndian = True
+
+# Use 1024 as base for log10 size statistics instead of 1000.
+log10exp = 1024 ** (1 / 3)
 
 # Command line options.
 options = None
@@ -42,6 +47,70 @@ def getTimeStr(seconds):
         return time.strftime('{}d%H:%M:%S'.format(int(seconds) // 86400), time.gmtime(int(seconds)))
 
 
+def roundBlock(size):
+    """Round size in bytes up to next block size.
+
+    0 -> 0
+    1 -> 4096
+    4096 -> 4096
+    4097 -> 8192
+    ...
+    """
+    return ((size + options.block_size - 1) // options.block_size ) * options.block_size
+
+
+def addListsElementWise(a, b):
+    """Add corresponding elements of two lists.
+
+    The two lists do not have to have the same length. Nonexisting elements are assumed to have a value of 0.
+    A new list is constructed and returned.
+    """
+    if len(b) > len(a):
+        a, b = b, a
+    # Now len(a) >= len(b)
+    r = a[:]
+    for i in range(len(b)):
+        r[i] += b[i]
+    return r
+
+
+class SizeHistogram:
+    """Statistics of one aspect with file size histograms (log2 and log10)
+    """
+    def __init__(self, name):
+        """Constructor.
+        """
+        self.name = name
+        self.n = 0
+        self.sizeHistLog2 = [0]
+        self.sizeHistLog10 = [0]
+
+
+    def add(self, size, oneOrSize):
+        """Add one file or file size.
+        """
+        self.n += oneOrSize
+        self._addHist(self.sizeHistLog2, 2, size, oneOrSize)
+        self._addHist(self.sizeHistLog10, log10exp, size, oneOrSize)
+
+
+    def _addHist(self, hist, exp, size, oneOrSize):
+        """Add one file or file size to one specific histogram.
+        """
+        index = log_base(size, exp)
+        while len(hist) < index + 1:
+            hist.append(0)
+        hist[index] += oneOrSize
+
+
+    def addSizeHistogram(self, hist):
+        """Add another SizeHistogram to this.
+        """
+        self.n += hist.n
+        self.sizeHistLog2 = addListsElementWise(self.sizeHistLog2, hist.sizeHistLog2)
+        self.sizeHistLog10 = addListsElementWise(self.sizeHistLog10, hist.sizeHistLog10)
+
+
 class Stat:
     """Global statistics.
     """
@@ -56,16 +125,16 @@ class Stat:
         self.numBytesHashed = 0
         self.numFilesHaveHash = 0
         self.numBytesHaveHash = 0
-        self.numFilesRedundant = 0
-        self.numBytesRedundant = 0
-        self.numFilesTotal = 0
-        self.numBytesTotal = 0
+        self.numFilesRedundant = SizeHistogram("Redundant")
+        self.numBytesRedundant = SizeHistogram("Redundant")
+        self.numFilesTotal = SizeHistogram("Total")
+        self.numBytesTotal = SizeHistogram("Total")
         self.numFilesSingletons = 0
         self.numBytesSingletons = 0
         self.numFilesNonSingletons = 0
         self.numBytesNonSingletons = 0
-        self.numFilesUnique = 0
-        self.numBytesUnique = 0
+        self.numFilesUnique = SizeHistogram("Unique")
+        self.numBytesUnique = SizeHistogram("Unique")
         self.numFilesSkipped = 0
         self.numBytesSkipped = 0
         self.currentDir = 0
@@ -81,47 +150,146 @@ class Stat:
         self.sizeFindDuplicates = 0
 
 
-    def printStats(self):
+    def printStats(self, file_):
         """Print statistics.
         """
-        self.numFilesDisk = self.numFilesUnique + self.numFilesRedundant
-        self.numBytesDisk = self.numBytesUnique + self.numBytesRedundant
+        numFilesDisk = self.numFilesUnique.n + self.numFilesRedundant.n
+        numBytesDisk = self.numBytesUnique.n + self.numBytesRedundant.n
 
         self.elapsedTime = time.time() - self.startTime
         if self.elapsedTime == 0:
             self.elapsedTime = 0.0001
         if self.hashTime == 0:
             self.hashTime = 0.0001
-        self.printAspect(self.numFilesTotal, self.numBytesTotal, "total, processed in {} ({}/s, {:.1f} files/s) (in {} dirs)".format(getTimeStr(self.elapsedTime), kB(self.numBytesTotal / self.elapsedTime), self.numFilesTotal / self.elapsedTime, self.numDirsTotal))
-        self.printAspect(self.numFilesDisk, self.numBytesDisk, "disk usage total")
-        self.printAspect(self.numFilesSingletons, self.numBytesSingletons, "singletons")
-        self.printAspect(self.numFilesNonSingletons, self.numBytesNonSingletons, "non-singletons")
-        self.printAspect(self.numFilesUnique, self.numBytesUnique, "unique files")
-        self.printAspect(self.numFilesHaveHash, self.numBytesHaveHash, "have a hash")
-        self.printAspect(self.numFilesRedundant, self.numBytesRedundant, "are redundant and not hardlinked")
-        self.printAspect(self.numFilesHashed, self.numBytesHashed, "got a new hash (in {}, {}/s)".format(getTimeStr(self.hashTime), kB(self.numBytesHashed / self.hashTime)))
-        self.printAspect(self.numFilesLinked, self.numBytesLinked, "got hardlinked")
-        self.printAspect(self.numFilesRemoved, self.numBytesRemoved, "got removed")
-        self.printAspect(self.numFilesSkipped, self.numBytesSkipped, "were skipped")
-        numFilesTotal = self.numFilesTotal
+        self.printAspect(file_, self.numFilesTotal.n, self.numBytesTotal.n, "total, processed in {} ({}/s, {:.1f} files/s) (in {} dirs)".format(getTimeStr(self.elapsedTime), kB(self.numBytesTotal.n / self.elapsedTime), self.numFilesTotal.n / self.elapsedTime, self.numDirsTotal))
+        self.printAspect(file_,      numFilesDisk, numBytesDisk, "disk usage total")
+        self.printAspect(file_, self.numFilesSingletons, self.numBytesSingletons, "singletons")
+        self.printAspect(file_, self.numFilesNonSingletons, self.numBytesNonSingletons, "non-singletons")
+        self.printAspect(file_, self.numFilesUnique.n, self.numBytesUnique.n, "unique files")
+        self.printAspect(file_, self.numFilesHaveHash, self.numBytesHaveHash, "have a hash")
+        self.printAspect(file_, self.numFilesRedundant.n, self.numBytesRedundant.n, "are redundant and not hardlinked")
+        self.printAspect(file_, self.numFilesHashed, self.numBytesHashed, "got a new hash (in {}, {}/s)".format(getTimeStr(self.hashTime), kB(self.numBytesHashed / self.hashTime)))
+        self.printAspect(file_, self.numFilesLinked, self.numBytesLinked, "got hardlinked")
+        self.printAspect(file_, self.numFilesRemoved, self.numBytesRemoved, "got removed")
+        self.printAspect(file_, self.numFilesSkipped, self.numBytesSkipped, "were skipped")
+        numFilesTotal = self.numFilesTotal.n
         if numFilesTotal == 0:
             numFilesTotal = 1
-        self.printAspect(self.numFilesTotal, self.numBytesInDb, "db entries ({:.1f} bytes/entry)".format(float(self.numBytesInDb) / numFilesTotal))
+        self.printAspect(file_, self.numFilesTotal.n, self.numBytesInDb, "db entries ({:.1f} bytes/entry)".format(float(self.numBytesInDb) / numFilesTotal))
 
 
-    def printAspect(self, numFiles, numBytes, aspectStr):
+    def printSizeHistograms(self, file_):
+        """Print size histogram.
+        """
+        numFilesDisk = copy.deepcopy(self.numFilesUnique)
+        numFilesDisk.name = "Disk usage"
+        numFilesDisk.addSizeHistogram(self.numFilesRedundant)
+        numBytesDisk = copy.deepcopy(self.numBytesUnique)
+        numBytesDisk.name = "Disk usage"
+        numBytesDisk.addSizeHistogram(self.numBytesRedundant)
+
+        self.printSizeHistogram2(file_, self.numFilesTotal, self.numBytesTotal, log10exp)
+        self.printSizeHistogram2(file_, self.numFilesTotal, self.numBytesTotal, 2)
+        self.printSizeHistogram2(file_,      numFilesDisk, numBytesDisk, log10exp)
+        self.printSizeHistogram2(file_,      numFilesDisk, numBytesDisk, 2)
+        self.printSizeHistogram2(file_, self.numFilesUnique, self.numBytesUnique, log10exp)
+        self.printSizeHistogram2(file_, self.numFilesUnique, self.numBytesUnique, 2)
+        self.printSizeHistogram2(file_, self.numFilesRedundant, self.numBytesRedundant, log10exp)
+        self.printSizeHistogram2(file_, self.numFilesRedundant, self.numBytesRedundant, 2)
+
+    def printSizeHistogram2(self, file_, filesHist, bytesHist, exp):
+        """Print size statistics for size ranges for exp.
+        """
+        if exp == 2:
+            filesList = filesHist.sizeHistLog2
+            bytesList = bytesHist.sizeHistLog2
+        else:
+            filesList = filesHist.sizeHistLog10
+            bytesList = bytesHist.sizeHistLog10
+
+        filesListMax = max(filesList)
+        filesListSum = sum(filesList)
+        bytesListMax = max(bytesList)
+        bytesListSum = sum(bytesList)
+
+        nameWidth = 20
+        if exp == log10exp:
+            print("Size  {:>{}} files ({:9d} files total)  {:>{}} bytes ({} total)".format(filesHist.name, nameWidth - 4, filesListSum, bytesHist.name, nameWidth + 7, kB(bytesListSum)), file = file_)
+
+        for i in range(len(filesList)):
+            lo = 0
+            hi = 0
+            if i > 0:
+                lo = exp ** (i-1)
+                hi = exp ** i
+            filesAcc = sum(filesList[0 : i + 1])
+            bytesAcc = sum(bytesList[0 : i + 1])
+            print("{}-{}: {} {}".format(kB(lo, 5), kB(hi, 5), self.histEntryStr(filesList[i], filesAcc, filesListSum, filesListMax), self.histEntryStr(bytesList[i], bytesAcc, bytesListSum, bytesListMax, bytes = True)), file = file_)
+        print(file = file_)
+
+
+    def histEntryStr(self, n, nAcc, total, max_, bytes = False):
+        """Print one histogram entry.
+        """
+        if total == 0:
+            total = 1
+        percent = n * 100.0 / total
+        percentAcc = nAcc * 100.0 / total
+        barWidth = 40
+        if max_ == 0:
+            max_ = 1
+        barX = int(round(n * float(barWidth) / max_))
+        if bytes:
+            nStr = kB(n, 5)
+        else:
+            nStr = "{:9d}".format(n)
+        return "{} {} {} {:{}}".format(nStr, per(percent), per(percentAcc), "#" * barX, barWidth)
+
+
+    def addTotal(self, size):
+        """Add one file and size to the totals (global and size range).
+        """
+        self.numFilesTotal.add(size, 1)
+        self.numBytesTotal.add(size, roundBlock(size))
+
+
+    def addUnique(self, size):
+        """Add one file and size to Unique counters (global and size range).
+        """
+        self.numFilesUnique.add(size, 1)
+        self.numBytesUnique.add(size, roundBlock(size))
+
+
+    def addRedundant(self, size):
+        """Add one file and size to Redundant counters (global and size range).
+        """
+        self.numFilesRedundant.add(size, 1)
+        self.numBytesRedundant.add(size, roundBlock(size))
+
+
+    def printAspect(self, file_, numFiles, numBytes, aspectStr):
         """Print aspect.
         """
-        numFilesTotal = self.numFilesTotal
+        numFilesTotal = self.numFilesTotal.n
         if numFilesTotal == 0:
             numFilesTotal = 1
-        numBytesTotal = self.numBytesTotal
+        numBytesTotal = self.numBytesTotal.n
         if numBytesTotal == 0:
             numBytesTotal = 1
-        print("{:8d} files ({:5.1f}%) and {} ({:5.1f}%) {}".format(numFiles, numFiles * 100.0 / numFilesTotal, kB(numBytes), numBytes * 100.0 / numBytesTotal, aspectStr))
+        print("{:8d} files ({}) and {} ({}) {}".format(numFiles, per(numFiles * 100.0 / numFilesTotal), kB(numBytes), per(numBytes * 100.0 / numBytesTotal), aspectStr), file = file_)
 
-
+# Global statistics.
 stats = Stat()
+
+
+def log_base(i, base):
+    """Integer -> integer log_base.
+    """
+    # Add a small epsilon since log() has a slight error and int() truncates,
+    # to avoid errors on powers of base.
+    if i == 0:
+        return 0
+    return int(math.log(i, base) + 0.00000000000001) + 1
 
 
 def strToBytes(filename):
@@ -143,7 +311,7 @@ def formatFloat(f, width):
     """
     # This is surpisingly complex due to rounding.
 
-    # First get the number of digit before the point (roughly, due to rounding).
+    # First get the number of digits before the point (roughly, due to rounding).
     s = "{:.0f}".format(f)
     prec = width - len(s) - 1
     if prec < 0:
@@ -158,6 +326,12 @@ def formatFloat(f, width):
     # This is the common case.
     s = "{:{w}.{p}f}".format(f, w = width, p = prec)
     return s
+
+
+def per(f, width = 5):
+    """Format percentage.
+    """
+    return formatFloat(f, width - 1) + "%"
 
 
 def kB(n, width = 7):
@@ -215,7 +389,8 @@ def remainingTimeStr(startTime, current, total):
 def progressStr(startTime, current, total):
     """Get progress string (a/b, HH::MM:SS remaining).
     """
-    return "{}/{} ({:.1f}%, {} rem)".format(current, total, current * 100.0 / total, remainingTimeStr(startTime, current, total))
+    w = len("{}".format(total))
+    return "{:{}d}/{} ({}, {} rem)".format(current, w, total, per(current * 100.0 / total), remainingTimeStr(startTime, current, total))
 
 
 def getNumHardlinks(path):
@@ -337,7 +512,6 @@ def printProgress(s):
     global needLf
     if not options.progress:
         return
-    sys.stdout.write(" ")
     sys.stdout.write(s)
     sys.stdout.write("    \r")
     sys.stdout.flush()
@@ -904,7 +1078,7 @@ def printProgressProcessingFiles(numAdditionalFiles = 0, message = ""):
 
     This is called from multiple locations to indicate progress.
     """
-    printProgress("Processing file {} ({}sz {}hsh {}rm {}lnk {})        ".format(progressStr(stats.startTimeFindDuplicates, stats.numFilesFindDuplicates + numAdditionalFiles, stats.totalFilesFindDuplicates), \
+    printProgress("{} ({}sz {}hsh {}rm {}lnk {})        ".format(progressStr(stats.startTimeFindDuplicates, stats.numFilesFindDuplicates + numAdditionalFiles, stats.totalFilesFindDuplicates), \
     kB(stats.sizeFindDuplicates), kB(stats.numBytesHashed), kB(stats.numBytesRemoved), kB(stats.numBytesLinked), message))
 
 
@@ -954,11 +1128,11 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
             printLf("Processing size {} ({}) ({} files, {} inodes, {} unique hashes)".format(size, kB(size, 5), len(allFiles), numInodes, len(fileLists)))
 
         for files in fileLists:
-            # Process identical files.
+            # Process files with identical hashes..
 
             # Update stats.
-            stats.numFilesUnique += 1
-            stats.numBytesUnique += files[0].size
+            stats.addTotal(files[0].size)
+            stats.addUnique(files[0].size)
             if len(files) == 1:
                 stats.numFilesSingletons += 1
                 stats.numBytesSingletons += files[0].size
@@ -967,12 +1141,10 @@ def findDuplicates(dbList_, func, justPropagateExistingHashes = False):
                 stats.numBytesNonSingletons += sum((f.size for f in files))
                 inodes = set([files[0].inode])
                 for f in files[1:]:
+                    stats.addTotal(f.size)
                     if f.inode not in inodes:
-                        stats.numFilesRedundant += 1
-                        stats.numBytesRedundant += f.size
+                        stats.addRedundant(f.size)
                         inodes.add(f.inode)
-            stats.numFilesTotal += len(files)
-            stats.numBytesTotal += sum((f.size for f in files))
             stats.numFilesHaveHash += sum((1 for f in files if f.hasHash()))
             stats.numBytesHaveHash += sum((f.size for f in files if f.hasHash()))
 
@@ -1221,7 +1393,7 @@ def main():
     global options
     usage = """Usage: %(prog)s [OPTIONS] DIRS...
     """
-    version = "0.2.1"
+    version = "0.3.2"
     parser = argparse.ArgumentParser(usage = usage + "\n(Version " + version + ")\n")
     parser.add_argument("args", nargs="*", help="Dirs to process.")
     parser.add_argument(      "--db", help="Database filename which stores all file attributes persistently between runs inside each dir.", type=str, default=".hardshrinkdb")
@@ -1231,6 +1403,7 @@ def main():
     parser.add_argument(      "--ignore-dirs-without-db", help="Ignore dirs which do not already have a db file.", action="store_true", default=False)
     parser.add_argument("-0", "--dummy", help="Dummy mode. Nothing will be hardlinked, but db files will be created/updated.", action="store_true", default=False)
     parser.add_argument("-V", "--verbose", help="Be more verbose. May be specified multiple times.", action="count", default=0) # -v is taken by --version, argh!
+    parser.add_argument(      "--stat-file", help="Save statistics and size histograms to file F. The default is stat_DATE_TIME.txt", type=str, default="")
     parser.add_argument(      "--quiet", help="Do not even print final stats.", action="store_true", default=False)
     parser.add_argument("-p", "--progress", help="Indicate progress.", action="store_true", default=False)
     parser.add_argument(      "--dump", help="Print DBs. Do not link/process anything further after scanning and/or reading dbs.", action="store_true", default=False)
@@ -1242,6 +1415,7 @@ def main():
     parser.add_argument(      "--reverse", help="Process smallest files first, going up. The default is process the biggest files first.", action="store_true", default=False)
     parser.add_argument(      "--min-size", help="Only process files >= min-size.", type=intWithUnit, default=0)
     parser.add_argument(      "--max-size", help="Only process files <= max-size.", type=intWithUnit, default=2**64)
+    parser.add_argument(      "--block-size", help="Block size of the filesystem. This is just used for the size statistics.", type=intWithUnit, default=4096)
     parser.add_argument(      "--hash-benchmark", help="Benchmark various hash algorithms, then exit.", action="store_true", default=False)
     options = parser.parse_args()
     options.db_bytes = strToBytes(options.db)
@@ -1286,7 +1460,7 @@ def main():
                 stats.numBytesInDb += db.getTotalDbSizeInBytes()
             stats.currentDir += 1
 
-        elif not options.dump:
+        if not options.dump:
 
             # Find and hardlink duplicates.
             func = linkFiles
@@ -1316,11 +1490,18 @@ def main():
         return
 
     if (not options.quiet) and (not options.dump):
-        stats.printStats()
+        stats.printStats(sys.stdout)
+
+    # Print stats to file.
+    if not options.stat_file:
+        options.stat_file = time.strftime("stat_%Y%m%d_%H%M%S.txt", time.localtime(time.time()))
+    with open(options.stat_file, "w") as f:
+        stats.printStats(f)
+        print(file = f)
+        stats.printSizeHistograms(f)
 
 
-
-# call main()
+# Call main().
 if __name__ == "__main__":
     main()
 
