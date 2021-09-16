@@ -1393,7 +1393,7 @@ def main():
     global options
     usage = """Usage: %(prog)s [OPTIONS] DIRS...
     """
-    version = "0.3.2"
+    version = "0.3.3"
     parser = argparse.ArgumentParser(usage = usage + "\n(Version " + version + ")\n")
     parser.add_argument("args", nargs="*", help="Dirs to process.")
     parser.add_argument(      "--db", help="Database filename which stores all file attributes persistently between runs inside each dir.", type=str, default=".hardshrinkdb")
@@ -1410,6 +1410,7 @@ def main():
     parser.add_argument("-D", "--print-duplicates", help="Print duplicate files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument(      "--print-singletons", help="Print singleton files. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument(      "--print-all", help="Print all files. Do not hardlink anything.", action="store_true", default=False)
+    parser.add_argument("-S", "--print-size", help="Print total size for each dir. Do not hardlink anything.", action="store_true", default=False)
     parser.add_argument("-W", "--progress-width", help="Width of the path display in the progress output.", type=int, default=100)
     parser.add_argument(      "--max-hardlinks", help="Maximum number of hardlinsk created per file. Must <= 65000 on Linux and <= 1023 on Windows.", type=int, default=55000)
     parser.add_argument(      "--reverse", help="Process smallest files first, going up. The default is process the biggest files first.", action="store_true", default=False)
@@ -1430,7 +1431,7 @@ def main():
     # Check args.
     if len(options.args) < 1:
         parser.error("Expecting at least one directory")
-    if options.print_duplicates + options.print_singletons + options.print_all > 1:
+    if options.print_duplicates + options.print_singletons + options.print_all + options.print_size > 1:
         parser.error("Only one of the --print-* options may be specified.")
     if os.name == "nt":
         if options.max_hardlinks > 500:
@@ -1454,13 +1455,16 @@ def main():
         stats.numDirsTotalCmdLine = len(options.args)
         for dir in options.args:
             db = processDir(strToBytes(os.path.normpath(dir)))
+            if options.print_size:
+                print("{}: {}     ".format(bytesToStr(db.rootDir), kB(db.getNumBytesInFiles())))
+                continue
             if db != None:
                 dbList.append(db)
                 stats.numDirsTotal += 1
                 stats.numBytesInDb += db.getTotalDbSizeInBytes()
             stats.currentDir += 1
 
-        if not options.dump:
+        if not (options.dump or options.print_size):
 
             # Find and hardlink duplicates.
             func = linkFiles
@@ -1489,7 +1493,7 @@ def main():
         print("Error: {}".format(str(e)))
         return
 
-    if (not options.quiet) and (not options.dump):
+    if (not options.quiet) and (not (options.dump or options.print_size)):
         stats.printStats(sys.stdout)
 
     # Print stats to file.
