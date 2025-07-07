@@ -191,10 +191,62 @@ static std::string percentSizeStr(size_t size, size_t total)
 }
 
 
+/// @brief DirDb represents one flat non-recursive directory.
 class DirDb
 {
 public:
-    DirDb(const std::string& path_, size_t commandLineIndex_): path(path_), commandLineIndex(commandLineIndex_)
+    DirDb(const std::string& path_, size_t commandLineIndex_): path(path_)
+    {
+    }
+
+    std::string getPath() const { return path; }
+
+    void forEachFile(auto func) const
+    {
+        for (const File& file: files)
+        {
+            func(file);
+        }
+    }
+
+    void scanDir(bool recursive)
+    {
+        for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path_))
+        {
+            if (entry.is_regular_file())
+            {
+                files.emplace_back(entry);
+            }
+            else if (entry.is_directory())
+            {
+                dirs.emplace_back(entry);
+                if (recursive)
+                {
+                    dirs.back().scanDir(recursive);
+                }
+            }
+            else
+            {
+                std::cout << "Warning: Ignoring " << ut1::getFileTypeStr(entry, false) << " " << entry.path() << "\n";
+            }
+            scanned = true;
+        }
+    }
+
+private:
+    // --- Private data. ---
+    std::string path;
+    std::vector<File> files;
+    std::vector<DirDb> dirs;
+    bool scanned{};
+};
+
+
+/// @brief  TreeDb represents one directory tree passed on the command line.
+class TreeDb
+{
+public:
+    TreeDb(const std::string& path_, size_t commandLineIndex_): path(path_), commandLineIndex(commandLineIndex_)
     {
         scanDir(path);
     }
@@ -212,7 +264,7 @@ public:
 
     /// @brief Print statistics comparing this dir to another dir db.
     /// @param otherDirDb Other dir db.
-    void printCompareStats(DirDb& otherDirDb)
+    void printCompareStats(TreeDb& otherDirDb)
     {
         size_t numFilesInOther{};
         size_t numBytesInOther{};
@@ -292,18 +344,18 @@ public:
 
     void addDir(const std::string& path, size_t commandLineIndex)
     {
-        dirDbs.push_back(DirDb(path, commandLineIndex));
+        treeDbs.push_back(TreeDb(path, commandLineIndex));
     }
 
     void printStats()
     {
-        for (auto &dirDb: dirDbs)
+        for (auto &dirDb: treeDbs)
         {
-            if (dirDbs.size() == 1)
+            if (treeDbs.size() == 1)
             {
                 dirDb.printStats();
             }
-            for (auto &dirDb2: dirDbs)
+            for (auto &dirDb2: treeDbs)
             {
                 if (dirDb.getCommandLineIndex() != dirDb2.getCommandLineIndex())
                 {
@@ -328,7 +380,7 @@ private:
     }
 
     // --- Private data. ---
-    std::list<DirDb> dirDbs;
+    std::list<TreeDb> treeDbs;
 };
 
 
