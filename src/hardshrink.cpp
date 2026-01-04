@@ -211,7 +211,7 @@ public:
 
     void scanDir(bool recursive)
     {
-        for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path_))
+        for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path))
         {
             if (entry.is_regular_file())
             {

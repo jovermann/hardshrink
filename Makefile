@@ -6,10 +6,10 @@
 # For GCC:
 #CXXFLAGS ?= -Wall -Wextra -O3
 # For clang:
-CXXFLAGS ?= -O3 -Weverything -Wno-c++98-compat -Wno-c++98-compat-pedantic -Wno-padded -Wno-shorten-64-to-32 -Wno-missing-prototypes -Wno-sign-conversion -Wno-implicit-int-conversion -Wno-poison-system-directories -fcomment-block-commands=n -Wno-string-conversion
-#CXXFLAGS ?= -g -Weverything -Wno-c++98-compat -Wno-c++98-compat-pedantic -Wno-padded -Wno-shorten-64-to-32 -Wno-missing-prototypes -Wno-sign-conversion -Wno-implicit-int-conversion -Wno-poison-system-directories -fcomment-block-commands=n -Wno-string-conversion
-CPPFLAGS ?= -pedantic -Iinclude -I.
-CXXSTD ?= -std=c++20 # C++17 for std::filesystem, C++20 for std::span and std::format
+CXXFLAGS ?= -O3 -Weverything -Wno-c++98-compat -Wno-c++98-compat-pedantic -Wno-padded -Wno-shorten-64-to-32 -Wno-missing-prototypes -Wno-sign-conversion -Wno-implicit-int-conversion -Wno-poison-system-directories -fcomment-block-commands=n -Wno-string-conversion -Wno-covered-switch-default
+#CXXFLAGS ?= -g -Weverything -Wno-c++98-compat -Wno-c++98-compat-pedantic -Wno-padded -Wno-shorten-64-to-32 -Wno-missing-prototypes -Wno-sign-conversion -Wno-implicit-int-conversion -Wno-poison-system-directories -fcomment-block-commands=n -Wno-string-conversion -Wno-covered-switch-default
+CPPFLAGS ?= -pedantic
+CXXSTD ?= -std=c++23 # C++23 for ranges
 
 BUILDDIR=build
 SOURCES = $(wildcard src/*.cpp)
